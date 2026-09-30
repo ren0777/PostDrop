@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ArtDrop</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>Art<span>Drop</span></h1>
+  <nav class="tabs">
+    <button class="tab active" data-tab="post">Post</button>
+    <button class="tab" data-tab="queue">Queue <span id="queue-badge" class="badge" hidden></span></button>
+    <button class="tab" data-tab="accounts">Accounts</button>
+    <button class="tab" data-tab="history">History</button>
+  </nav>
+  <span class="version">M6</span>
+</header>
+
+<div id="lazy-banner" class="banner" hidden>
+  <span>Lazy mode is on — ArtDrop is posting from your outbox folders.</span>
+  <span id="lazy-counts" class="muted"></span>
+  <button id="lazy-pause">Pause</button>
+</div>
+
+<main>
+  <section id="tab-post" class="tab-panel">
+    <div class="panel-grid">
+      <div class="left">
+        <div id="drop" class="drop">
+          <p><strong>Drop your art here</strong></p>
+          <p class="muted">images, plus an optional <code>piece.txt</code> for caption and tags</p>
+          <label class="browse">or click to browse<input id="file-input" type="file" multiple accept="image/*,.txt" hidden></label>
+        </div>
+        <div id="thumbs" class="thumbs"></div>
+        <div class="ai-box">
+          <p class="ai-title">✨ Caption AI <span class="muted">— optional: writes captions and tags from the image</span></p>
+          <div class="ai-row">
+            <input id="character" type="text" name="artdrop-character" autocomplete="off" placeholder="Character (e.g. Raiden Shogun)">
+            <input id="series" type="text" name="artdrop-series" autocomplete="off" placeholder="Series / game (optional)">
+          </div>
+          <input id="notes" type="text" name="artdrop-notes" autocomplete="off" placeholder="Extra notes for the model (optional)">
+          <div class="ai-actions">
+            <label class="dry"><input type="checkbox" id="mature"> Suggestive / mature</label>
+            <button id="generate">✨ Generate</button>
+            <span id="generate-status" class="muted"></span>
+          </div>
+        </div>
+        <label class="field">Caption
+          <textarea id="caption" rows="6" placeholder="Describe the piece…"></textarea>
+        </label>
+        <label class="dry"><input type="checkbox" id="caption-exact"> Use my caption as-is
+          <span class="muted">(otherwise ✨ Generate polishes it)</span></label>
+        <label class="field">Tags
+          <input id="tags" type="text" placeholder="art, illustration, aiart (commas or spaces)">
+        </label>
+        <label class="field">Alt text
+          <input id="alt" type="text" placeholder="Short description of the image (accessibility)">
+        </label>
+      </div>
+      <div class="right">
+        <h2>Sites</h2>
+        <div id="cards"></div>
+      </div>
+    </div>
+    <footer class="postbar">
+      <label class="dry"><input type="checkbox" id="dry-run"> Dry run — show what would be posted, post nothing</label>
+      <button id="new-post">New post</button>
+      <button id="post" class="primary">Post</button>
+    </footer>
+  </section>
+
+  <section id="tab-queue" class="tab-panel" hidden>
+    <div id="lazy-settings"></div>
+    <div id="queue-list"></div>
+  </section>
+
+  <section id="tab-accounts" class="tab-panel" hidden>
+    <p class="muted">Settings are stored in Windows Credential Manager, never in a file. Secrets are never shown back to this page.</p>
+    <div id="accounts"></div>
+  </section>
+
+  <section id="tab-history" class="tab-panel" hidden>
+    <div class="row">
+      <button id="refresh-history">Refresh</button>
+    </div>
+    <div id="history"></div>
+  </section>
+</main>
+
+<div id="toast" class="toast" hidden></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

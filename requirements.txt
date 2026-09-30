@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+httpx
+Pillow
+python-multipart
+keyring
+playwright
+pytest
