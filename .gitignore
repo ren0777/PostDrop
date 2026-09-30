@@ -1,0 +1,14 @@
+# Private, machine-local things — never share these
+data/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.log
+.venv/.requirements-hash
+.venv/.playwright-ready
+
+# Working notes for this machine (the design notes live outside the repo)
+OPEN-SOURCE-CHECKLIST.md
+PLAN.md
+REVIEW-*.md
