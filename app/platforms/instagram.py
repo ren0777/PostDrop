@@ -13,7 +13,7 @@ import re
 import httpx
 
 from ..core import secrets
-from ..core.imagehost import HostedImage, ImgBBHost
+from ..core.imagehost import FallbackHost, HostedImage, ImageHost, ImgBBHost, UguuHost
 from ..core.images import Prepared, pad_to_ratio, prepare
 from ..core.oauth import Provider, needs_refresh, tokens_from
 from .base import Field, PublishError
@@ -107,11 +107,12 @@ class Instagram(OAuthConnector):
             prepared.append(pad_to_ratio(item, max_bytes=self.max_bytes, max_side=self.max_side))
         return prepared
 
-    def host(self, cfg: dict) -> ImgBBHost:
+    def host(self, cfg: dict) -> ImageHost:
+        """imgbb first; uguu.se takes over when imgbb is down (seen: "down for maintenance")."""
         key = str(cfg.get("imgbb_api_key") or "").strip()
         if not key:
             raise PublishError("Instagram needs a free imgbb API key — add it in Accounts.")
-        return ImgBBHost(key)
+        return FallbackHost([ImgBBHost(key), UguuHost()])
 
     def _json(self, response: httpx.Response, fallback: str) -> dict:
         """Both error shapes: Graph's {"error": {...}} and Instagram's flat one."""
