@@ -1,4 +1,6 @@
 """Lazy mode (M6): settings, folder scanning, batches and routing."""
+import os
+import time
 from pathlib import Path
 
 from app.core import lazy, settings
@@ -311,3 +313,32 @@ def test_a_folder_name_can_carry_the_series():
     assert lazy.folder_identity("March 7th") == ("March 7th", "")
     assert lazy.folder_identity("Changli - 2") == ("Changli 2", "")  # a number is no series
     assert lazy.artist_name("Citlali- genshin impact") == "Citlali"
+
+
+def test_a_subfolder_is_one_batch_however_old_its_files_are(tmp_path):
+    """Issue #3: 12 images with dates a month apart were cut into ~8 sets."""
+    folder = tmp_path / "outbox"
+    sub = folder / "mix 1"
+    sub.mkdir(parents=True)
+    now = time.time()
+    for index, age_days in enumerate((33, 33, 32, 28, 22, 2)):
+        path = sub / f"{index}.png"
+        path.write_bytes(b"x%d" % index)
+        stamp = now - age_days * 86400
+        os.utime(path, (stamp, stamp))
+
+    found = lazy.batches(folder, now=now)
+
+    assert [[path.name for path in batch] for batch in found] == [
+        ["0.png", "1.png", "2.png", "3.png", "4.png", "5.png"]]
+
+
+def test_a_copied_file_arrives_when_it_was_copied(tmp_path):
+    from conftest import REAL_ARRIVED
+
+    path = tmp_path / "old.png"
+    path.write_bytes(b"x")
+    old = time.time() - 30 * 86400
+    os.utime(path, (old, old))  # a copy keeps its old modified date…
+
+    assert REAL_ARRIVED(path) > time.time() - 60  # …but it landed just now
