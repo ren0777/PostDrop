@@ -215,15 +215,17 @@ def test_removed_posts_give_their_slots_back(tmp_path, monkeypatch):
     assert due[2] - due[1] == 120 * 60
 
 
-def test_compacting_never_delays_a_post(tmp_path, monkeypatch):
+def test_overdue_posts_show_when_they_really_go_after_the_pc_was_off(tmp_path, monkeypatch):
+    """Live: off 1:40-11:59 AM; after the catch-up post the rest still said 6 AM."""
     monkeypatch.setattr(lazy, "root", lambda: tmp_path / "ArtDrop")
+    morning = time.time() - 10 * 3600
+    ids = queue.add_items([_item("telegram") for _ in range(3)],
+                          spacing_minutes={"telegram": 120}, now=morning)
     now = time.time()
-    queue.add_items([_item("telegram")], spacing_minutes={"telegram": 120}, now=now)
-    queue.mark_posted(queue.add_items([_item("telegram")], spacing_minutes={"telegram": 120},
-                                      now=now)[0], now=now)
-    before = {item["id"]: item["due_at"] for item in queue.items(status="pending")}
+    queue.mark_posted(ids[0], now=now)  # the one catch-up post right after start
 
     queue.compact_schedule(now=now, quiet={"enabled": False})
 
-    after = {item["id"]: item["due_at"] for item in queue.items(status="pending")}
-    assert all(after[key] <= before[key] for key in before)
+    due = sorted(item["due_at"] for item in queue.items(status="pending"))
+    assert abs(due[0] - (now + 120 * 60)) < 1  # the next really goes in 2 hours
+    assert abs(due[1] - (now + 240 * 60)) < 1
