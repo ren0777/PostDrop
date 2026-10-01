@@ -752,6 +752,8 @@ class LazyWorker:
             if not queue.card_ready(card_id, limits["spacing_minutes"], now):
                 continue  # the PC was off: catch up one post at a time
             results.append(await self._post(entry, card_id))
+        if results:
+            queue.compact_schedule()  # the Queue tab shows when the rest really go
         return results
 
     async def _post(self, entry: dict, card_id: str) -> dict:
