@@ -23,3 +23,13 @@ def isolated_data(monkeypatch, tmp_path):
     monkeypatch.setattr(paths, "QUEUE_PATH", tmp_path / "data" / "queue.sqlite")
     # …and never into the user's real Pictures folder either.
     monkeypatch.setattr(lazy, "root", lambda: tmp_path / "Pictures" / "ArtDrop")
+
+
+REAL_ARRIVED = lazy.arrived
+
+
+@pytest.fixture(autouse=True)
+def arrival_is_the_modified_time(monkeypatch):
+    """Tests date files with os.utime, which cannot set Windows' creation time:
+    the faked modified time stands for when the file arrived."""
+    monkeypatch.setattr(lazy, "arrived", lambda path: float(path.stat().st_mtime))
