@@ -73,3 +73,58 @@ class ImgBBHost(ImageHost):
         """imgbb's delete link is a web page with a confirm button, so this is a
         no-op; the one-hour `expiration` cleans the image up instead."""
         return
+
+
+UGUU_UPLOAD = "https://uguu.se/upload"
+
+
+class UguuHost(ImageHost):
+    """uguu.se: no account or key, and files delete themselves after 3 hours.
+
+    The backup when imgbb is down. Its links serve the image itself (what
+    Instagram's fetcher needs); Litterbox and 0x0.st were tried and are
+    blocked or closed, and tmpfiles.org only links to a web page.
+    """
+
+    name = "uguu"
+
+    def upload(self, data: bytes, filename: str) -> HostedImage:
+        try:
+            response = httpx.post(UGUU_UPLOAD, files={"files[]": (filename, data, "image/jpeg")},
+                                  timeout=TIMEOUT)
+            body = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise ImageHostError(f"uguu upload failed: {type(exc).__name__}") from exc
+        files = body.get("files") if isinstance(body, dict) else None
+        url = str((files[0] or {}).get("url") or "") if isinstance(files, list) and files else ""
+        if response.status_code != 200 or not body.get("success") or not url:
+            detail = str(body.get("description") or "") if isinstance(body, dict) else ""
+            raise ImageHostError(f"uguu upload failed: {detail or f'HTTP {response.status_code}'}")
+        return HostedImage(url=url)
+
+
+class FallbackHost(ImageHost):
+    """Try each host in turn: a maintenance day at one host does not stop posting."""
+
+    name = "fallback"
+
+    def __init__(self, hosts: list[ImageHost]):
+        self.hosts = list(hosts)
+        self._owner: dict[str, ImageHost] = {}
+
+    def upload(self, data: bytes, filename: str) -> HostedImage:
+        errors: list[str] = []
+        for host in self.hosts:
+            try:
+                hosted = host.upload(data, filename)
+            except ImageHostError as exc:
+                errors.append(str(exc))
+                continue
+            self._owner[hosted.url] = host
+            return hosted
+        raise ImageHostError("; ".join(errors) or "no image host is set up")
+
+    def delete(self, hosted: HostedImage) -> None:
+        owner = self._owner.get(hosted.url)
+        if owner is not None:
+            owner.delete(hosted)
