@@ -1014,8 +1014,17 @@ async function loadCaptionSettings() {
   state.caption = await api("/api/caption/settings");
 }
 
+const CAPTION_KEY_HELP = {
+  opencode: "From opencode.ai → Console → Go.",
+  gemini: "From aistudio.google.com → Get API key.",
+};
+
 function renderCaptionCard() {
   const cfg = state.caption || {};
+  const providers = cfg.providers || {};
+  const current = providers[cfg.provider] || {};
+  const options = Object.entries(providers).map(([id, info]) =>
+    `<option value="${id}" ${id === cfg.provider ? "selected" : ""}>${escapeHtml(info.label)}</option>`).join("");
   $("#accounts").insertAdjacentHTML("beforeend", `
     <article class="card account" id="account-caption">
       <header>
@@ -1023,24 +1032,29 @@ function renderCaptionCard() {
         <span class="badge ${cfg.configured ? "ok" : "miss"}">${cfg.configured ? "set up" : "not set up"}</span>
       </header>
       <div class="field">
-        <label for="caption-api-key">OpenCode Go API key</label>
+        <label for="caption-provider">Provider</label>
+        <select id="caption-provider">${options}</select>
+        <p class="help">Switching keeps the other provider's key and models for when you switch back.</p>
+      </div>
+      <div class="field">
+        <label for="caption-api-key">${escapeHtml(current.label || "")} API key</label>
         <input id="caption-api-key" type="password" placeholder="${cfg.api_key_saved ? "saved — leave blank to keep" : "paste your key"}">
-        <p class="help">From opencode.ai → Console → Go. Stored in Windows Credential Manager, never on disk.</p>
+        <p class="help">${CAPTION_KEY_HELP[cfg.provider] || ""} Stored in Windows Credential Manager, never on disk.</p>
       </div>
       <div class="field">
         <label for="caption-vision-model">Vision model</label>
         <input id="caption-vision-model" type="text" value="${escapeHtml(cfg.vision_model || "")}">
-        <p class="help">Reads the artwork first. Default: deepseek-v4.1-flash</p>
+        <p class="help">Reads the artwork first. Default: ${escapeHtml(current.vision_model || "")}</p>
       </div>
       <div class="field">
         <label for="caption-backup-model">Backup model</label>
         <input id="caption-backup-model" type="text" value="${escapeHtml(cfg.backup_model || "")}">
-        <p class="help">Takes over when the vision model fails. Default: mimo-v2.6-flash</p>
+        <p class="help">Takes over when the vision model fails. Default: ${escapeHtml(current.backup_model || "")}</p>
       </div>
       <div class="field">
         <label for="caption-strong-model">Strong model (optional)</label>
         <input id="caption-strong-model" type="text" value="${escapeHtml(cfg.strong_model || "")}"
-               placeholder="e.g. kimi-k3">
+               placeholder="${cfg.provider === "gemini" ? "e.g. a Gemini Pro model" : "e.g. kimi-k3"}">
         <p class="help">A third, stronger model for characters the first two are unsure about
           (new gacha/anime characters). Empty = off. It also double-checks a confident answer:
           if two models name different characters, the set waits for you instead of guessing.</p>
@@ -1059,6 +1073,15 @@ function renderCaptionCard() {
     .forEach((button) => {
       button.addEventListener("click", () => captionAction(button.dataset.captionAction));
     });
+  document.getElementById("caption-provider").addEventListener("change", async (event) => {
+    await api("/api/caption/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: event.target.value }),
+    });
+    await loadCaptionSettings();
+    renderAccounts();
+  });
 }
 
 async function captionAction(action) {
