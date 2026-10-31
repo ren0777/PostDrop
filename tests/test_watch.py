@@ -30,11 +30,11 @@ class FakeCaption:
         self.calls: list = []
 
     async def __call__(self, *, cfg, images, platforms, mature=False, caption_draft="",
-                       caption_exact=False, given=None):
+                       caption_exact=False, given=None, parts=None):
         self.calls.append({"images": [str(image) for image in images],
                            "platforms": list(platforms), "mature": mature,
                            "caption_draft": caption_draft, "caption_exact": caption_exact,
-                           "given": given})
+                           "given": given, "parts": dict(parts or {})})
         if self.error:
             raise RuntimeError(self.error)
         captions = {site: (caption_draft if (caption_draft and caption_exact)
@@ -191,6 +191,54 @@ def test_scanning_the_same_batch_twice_queues_it_once(tmp_path, monkeypatch):
 
     assert asyncio.run(worker.scan())["queued"] == 1
     assert asyncio.run(worker.scan())["queued"] == 0
+
+
+def test_overlapping_scans_queue_a_set_only_once(tmp_path, monkeypatch):
+    """Live bug: a slow AI call let the loop and button presses scan the same
+    set side by side, and each scan queued its own copy (eight Shenhe sets)."""
+    worker, outbox, caption, _ = _setup(
+        tmp_path, monkeypatch, cards=["bluesky"], folder_cards=["bluesky"])
+    _drop(outbox / "Shenhe", "1.png")
+    fast = caption.__call__
+
+    async def slow(**kwargs):
+        await asyncio.sleep(0.05)  # the AI is thinking while the other scans start
+        return await fast(**kwargs)
+
+    worker.caption = slow
+
+    async def overlap():
+        return await asyncio.gather(*(worker.scan() for _ in range(4)))
+
+    summaries = asyncio.run(overlap())
+
+    assert sum(summary["queued"] for summary in summaries) == 1
+    assert len(queue.items()) == 1
+    assert len(caption.calls) == 1
+
+
+def test_each_post_of_a_split_set_gets_its_own_caption(tmp_path, monkeypatch):
+    worker, outbox, caption, _ = _setup(
+        tmp_path, monkeypatch, cards=["bluesky", "telegram"],
+        folder_cards=["bluesky", "telegram"])
+    for index in range(10):
+        _drop(outbox / "Shenhe", f"{index:02d}.png", body=f"image-{index}".encode())
+    fake = caption.__call__
+
+    async def with_parts(**kwargs):
+        result = await fake(**kwargs)
+        for site, count in (kwargs.get("parts") or {}).items():
+            result["platforms"][site]["captions"] = [f"{site} part {n}" for n in range(count)]
+        return result
+
+    worker.caption = with_parts
+    asyncio.run(worker.scan())
+
+    assert caption.calls[0]["parts"] == {"bluesky": 3}  # 10 images, 4 per Bluesky post
+    bluesky = [entry["caption"] for entry in queue.items() if entry["card_id"] == "bluesky"]
+    assert bluesky == ["bluesky part 0", "bluesky part 1", "bluesky part 2"]
+    telegram = [entry["caption"] for entry in queue.items() if entry["card_id"] == "telegram"]
+    assert telegram == ["telegram caption"]  # one post: the plain caption
 
 
 def test_paused_and_off_lazy_mode_do_nothing(tmp_path, monkeypatch):
@@ -386,7 +434,7 @@ class FakeMixed:
         self.calls: list = []
 
     async def __call__(self, *, cfg, images, characters, series, platforms, mature=False,
-                       caption_draft="", caption_exact=False, given=None):
+                       caption_draft="", caption_exact=False, given=None, parts=None):
         self.calls.append({"images": [str(image) for image in images],
                            "characters": list(characters), "series": list(series),
                            "platforms": list(platforms), "mature": mature,

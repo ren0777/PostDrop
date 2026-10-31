@@ -1,7 +1,7 @@
 """Caption AI: captions, tags and alt text written by a vision model.
 
-The provider is OpenCode Go (OpenAI Chat Completions format). The primary
-model looks at the image; a backup model takes over when it fails, and a
+The provider is OpenCode Go or Google Gemini, both spoken to in the OpenAI
+Chat Completions format (see PROVIDERS). The primary model looks at the image; a backup model takes over when it fails, and a
 name-only call is the last resort (for example when a model refuses a
 suggestive image).
 
@@ -42,6 +42,68 @@ MIXED_IMAGE_LIMIT = 4  # cover + three spread across the set
 
 DEFAULT_VISION_MODEL = "deepseek-v4.1-flash"
 DEFAULT_BACKUP_MODEL = "mimo-v2.6-flash"
+
+# Both providers speak Chat Completions; only the address, the key and the
+# default models differ. Gemini's OpenAI-compatible endpoint takes a key from
+# aistudio.google.com as a Bearer token.
+PROVIDERS = {
+    "opencode": {
+        "label": "OpenCode Go",
+        "endpoint": ENDPOINT,
+        "vision_model": DEFAULT_VISION_MODEL,
+        "backup_model": DEFAULT_BACKUP_MODEL,
+    },
+    "gemini": {
+        "label": "Google Gemini",
+        "endpoint": "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+        # Flash-Lite answers in seconds; 3.8 Flash was overloaded or over the
+        # free quota when tried, so the slower 3.6 Flash is the backup.
+        "vision_model": "gemini-3.5-flash-lite",
+        "backup_model": "gemini-3.6-flash",
+    },
+}
+DEFAULT_PROVIDER = "opencode"
+# The settings each provider keeps for itself, so switching back loses nothing.
+PROFILE_KEYS = ("api_key", "vision_model", "backup_model", "strong_model")
+
+
+def provider(cfg: dict) -> str:
+    name = str(cfg.get("provider") or DEFAULT_PROVIDER)
+    return name if name in PROVIDERS else DEFAULT_PROVIDER
+
+
+def provider_label(cfg: dict) -> str:
+    return PROVIDERS[provider(cfg)]["label"]
+
+
+def vision_model(cfg: dict) -> str:
+    return str(cfg.get("vision_model") or PROVIDERS[provider(cfg)]["vision_model"])
+
+
+def backup_model(cfg: dict) -> str:
+    return str(cfg.get("backup_model") or PROVIDERS[provider(cfg)]["backup_model"])
+
+
+def switch_provider(cfg: dict, name: str) -> dict:
+    """The settings with `name` active: the old provider's key and models are put
+    aside under "profiles" and the new one's are brought back."""
+    if name not in PROVIDERS or name == provider(cfg):
+        return cfg
+    cfg = dict(cfg)
+    profiles = dict(cfg.get("profiles") or {})
+    profiles[provider(cfg)] = {key: cfg[key] for key in PROFILE_KEYS if cfg.get(key)}
+    for key in PROFILE_KEYS:
+        cfg.pop(key, None)
+    cfg.update(profiles.pop(name, {}))
+    cfg["profiles"] = profiles
+    cfg["provider"] = name
+    return cfg
+
+
+def _require_key(cfg: dict) -> None:
+    if not str(cfg.get("api_key") or "").strip():
+        raise CaptionError(
+            f"Caption AI is not set up yet — add your {provider_label(cfg)} API key.")
 
 # Models sometimes end the caption with the hashtag line themselves.
 _WHOLE_TAG_LINE_RE = re.compile(r"^\s*(?:#[\w.]+(?:\s+|$))+$", re.UNICODE)
@@ -145,9 +207,39 @@ def _is_transient(status: int) -> bool:
     return status >= 500 or status in (408, 429)
 
 
+def parts_rules(parts: dict | None, platforms, *, exact: bool = False) -> list[str]:
+    """Sites that split the set into several posts get one caption per post."""
+    if exact:
+        return []  # the artist's words are used on every post
+    lines = []
+    for site in platforms:
+        count = int((parts or {}).get(site) or 1)
+        if count > 1:
+            lines.append(
+                f'- {site} splits this set into {count} separate posts: inside its entry also '
+                f'give "captions", a list of {count} captions, one per post. Each must be '
+                "worded differently (no two may open the same way) while following the same "
+                'site style; the first one is the same as "caption".')
+    return lines
+
+
+def with_parts(entry: dict, raw: dict) -> dict:
+    """Keep a site's per-post captions, cleaned like its main caption."""
+    given = raw.get("captions")
+    captions = []
+    for text in given if isinstance(given, list) else []:
+        cleaned, _ = _strip_trailing_tags(str(text or ""))
+        if cleaned:
+            captions.append(cleaned)
+    if captions:
+        entry["captions"] = captions
+    return entry
+
+
 def build_lazy_prompt(*, platforms, mature: bool = False, has_image: bool = True,
                       add_ai_tag: bool = True, caption_draft: str = "",
-                      caption_exact: bool = False, given: dict | None = None) -> str:
+                      caption_exact: bool = False, given: dict | None = None,
+                      parts: dict | None = None) -> str:
     """The lazy-mode prompt: no character was typed, so identify it first."""
     base = build_prompt(character="(recognise it from the image)", series="", notes="",
                         mature=mature, platforms=platforms, has_image=has_image,
@@ -164,6 +256,7 @@ def build_lazy_prompt(*, platforms, mature: bool = False, has_image: bool = True
         "otherwise. Do not guess: a wrong name is worse than an empty one.",
     ]
     rules += caption_rules(draft=caption_draft, exact=caption_exact)
+    rules += parts_rules(parts, platforms, exact=bool(caption_draft and caption_exact))
     block = given_block(given)
     if block:
         rules += block.split("\n")
@@ -174,14 +267,13 @@ def build_lazy_prompt(*, platforms, mature: bool = False, has_image: bool = True
 
 async def generate_lazy(*, cfg: dict, images, platforms=(), mature: bool = False,
                         caption_draft: str = "", caption_exact: bool = False,
-                        given: dict | None = None) -> dict:
+                        given: dict | None = None, parts: dict | None = None) -> dict:
     """Lazy mode: one call per batch that identifies the character and captions it.
 
     The work is split in two halves — the Western sites and Pixiv (Japanese) — and
     they run in parallel, so one slow half cannot fail the other.
     """
-    if not str(cfg.get("api_key") or "").strip():
-        raise CaptionError("Caption AI is not set up yet — add your OpenCode Go API key.")
+    _require_key(cfg)
     platforms = list(platforms or [])
     if not platforms:
         raise CaptionError("Lazy mode has no sites to post to.")
@@ -192,11 +284,12 @@ async def generate_lazy(*, cfg: dict, images, platforms=(), mature: bool = False
     if len(halves) == 1:
         result = await _lazy_call(cfg, image, platforms=halves[0], mature=mature,
                                   caption_draft=caption_draft, caption_exact=caption_exact,
-                                  given=given)
+                                  given=given, parts=parts)
         return {**result, "seen": [result.get("character") or ""]}
     results = await asyncio.gather(
         *(_lazy_call(cfg, image, platforms=half, mature=mature,
-                     caption_draft=caption_draft, caption_exact=caption_exact, given=given)
+                     caption_draft=caption_draft, caption_exact=caption_exact, given=given,
+                     parts=parts)
           for half in halves),
         return_exceptions=True,
     )
@@ -209,13 +302,13 @@ async def generate_lazy(*, cfg: dict, images, platforms=(), mature: bool = False
 
 async def _lazy_call(cfg: dict, image, *, platforms: list[str], mature: bool,
                      caption_draft: str, caption_exact: bool,
-                     given: dict | None = None) -> dict:
+                     given: dict | None = None, parts: dict | None = None) -> dict:
     prompt = build_lazy_prompt(platforms=platforms, mature=mature, has_image=True,
                                caption_draft=caption_draft, caption_exact=caption_exact,
-                               given=given,
+                               given=given, parts=parts,
                                add_ai_tag=bool(cfg.get("add_ai_tag", True)))
-    models = [(str(cfg.get("vision_model") or DEFAULT_VISION_MODEL), True),
-              (str(cfg.get("backup_model") or DEFAULT_BACKUP_MODEL), True)]
+    models = [(vision_model(cfg), True),
+              (backup_model(cfg), True)]
     last_error = ""
     errors: list[Exception] = []
     for attempt, (model, with_image) in enumerate(models, start=1):
@@ -236,6 +329,7 @@ async def _lazy_call(cfg: dict, image, *, platforms: list[str], mature: bool,
             for entry in (result.get("platforms") or {}).values():
                 if isinstance(entry, dict):
                     entry["caption"] = str(caption_draft).strip()
+                    entry.pop("captions", None)
         for site, entry in (result.get("platforms") or {}).items():
             if isinstance(entry, dict):
                 entry["tags"] = ensure_tags(entry.get("tags") or [],
@@ -308,12 +402,11 @@ async def identify(*, cfg: dict, image, verify: bool = True, escalate: bool = Tr
     confident answer, and two models naming different characters mean "not
     confident" (a wrong name is worse than none).
     """
-    if not str(cfg.get("api_key") or "").strip():
-        raise CaptionError("Caption AI is not set up yet — add your OpenCode Go API key.")
+    _require_key(cfg)
     image_part = _image_part(image, max_bytes=SMALL_IMAGE_BYTES, max_side=SMALL_IMAGE_SIDE)
     prompt = build_identify_prompt()
-    vision = str(cfg.get("vision_model") or DEFAULT_VISION_MODEL)
-    backup = str(cfg.get("backup_model") or DEFAULT_BACKUP_MODEL)
+    vision = vision_model(cfg)
+    backup = backup_model(cfg)
     strong = str(cfg.get("strong_model") or "").strip()
     models = [vision]
     if escalate:  # the per-pass escalation budget is spent else: the primary only
@@ -514,7 +607,8 @@ def ensure_tags(tags, required, site: str = "") -> list[str]:
 
 def build_mixed_prompt(*, characters, series=(), platforms, mature: bool = False,
                        caption_draft: str = "", caption_exact: bool = False,
-                       has_images: bool = True, given: dict | None = None) -> str:
+                       has_images: bool = True, given: dict | None = None,
+                       parts: dict | None = None) -> str:
     """The prompt for a post that shows several characters at once (docs/ARCHITECTURE.md)."""
     lines = [
         "You write the caption for one social-media post that shows several characters at once.",
@@ -552,6 +646,7 @@ def build_mixed_prompt(*, characters, series=(), platforms, mature: bool = False
     block = given_block(given)
     if block:
         lines += block.split("\n")
+    lines += parts_rules(parts, platforms, exact=bool(caption_draft and caption_exact))
     if caption_draft:
         lines += caption_rules(draft=caption_draft, exact=caption_exact)
     else:
@@ -613,13 +708,13 @@ def fallback_mixed_caption(site: str, characters=()) -> str:
 
 async def generate_mixed(*, cfg: dict, images, characters=(), series=(), platforms=(),
                          mature: bool = False, caption_draft: str = "",
-                         caption_exact: bool = False, given: dict | None = None) -> dict:
+                         caption_exact: bool = False, given: dict | None = None,
+                         parts: dict | None = None) -> dict:
     """A universal caption for a mixed set, with every character and series tagged.
 
     Split in two halves (Western sites and Pixiv) exactly like `generate_lazy`.
     """
-    if not str(cfg.get("api_key") or "").strip():
-        raise CaptionError("Caption AI is not set up yet — add your OpenCode Go API key.")
+    _require_key(cfg)
     platforms = list(platforms or [])
     if not platforms:
         raise CaptionError("Lazy mode has no sites to post to.")
@@ -635,11 +730,11 @@ async def generate_mixed(*, cfg: dict, images, characters=(), series=(), platfor
         return await _mixed_call(cfg, attachments, characters=characters, series=series,
                                  platforms=halves[0], mature=mature,
                                  caption_draft=caption_draft, caption_exact=caption_exact,
-                                 given=given)
+                                 given=given, parts=parts)
     results = await asyncio.gather(
         *(_mixed_call(cfg, attachments, characters=characters, series=series,
                       platforms=half, mature=mature, caption_draft=caption_draft,
-                      caption_exact=caption_exact, given=given)
+                      caption_exact=caption_exact, given=given, parts=parts)
           for half in halves),
         return_exceptions=True,
     )
@@ -649,15 +744,15 @@ async def generate_mixed(*, cfg: dict, images, characters=(), series=(), platfor
 async def _mixed_call(cfg: dict, attachments: list, *, characters: list[str],
                       series: list[str], platforms: list[str], mature: bool,
                       caption_draft: str, caption_exact: bool,
-                      given: dict | None = None) -> dict:
+                      given: dict | None = None, parts: dict | None = None) -> dict:
     prompt = build_mixed_prompt(characters=characters, series=series, platforms=platforms,
                                 mature=mature, caption_draft=caption_draft,
                                 caption_exact=caption_exact, has_images=True,
-                                given=given)
+                                given=given, parts=parts)
     last_error = ""
     errors: list[Exception] = []
-    for attempt, model in enumerate((str(cfg.get("vision_model") or DEFAULT_VISION_MODEL),
-                                     str(cfg.get("backup_model") or DEFAULT_BACKUP_MODEL)),
+    for attempt, model in enumerate((vision_model(cfg),
+                                     backup_model(cfg)),
                                     start=1):
         try:
             raw = await _attempt(cfg, model, _messages(prompt, attachments),
@@ -680,6 +775,7 @@ async def _mixed_call(cfg: dict, attachments: list, *, characters: list[str],
                 entry["tags"] = ensure_tags(entry.get("tags") or [], must, site)
                 if caption_draft and caption_exact:
                     entry["caption"] = str(caption_draft).strip()
+                    entry.pop("captions", None)
                 elif not str(entry.get("caption") or "").strip():
                     # a blank answer (it happened live on Pixiv) never reaches a post
                     entry["caption"] = (str(caption_draft).strip()
@@ -843,7 +939,7 @@ def normalize(data: dict, platforms, character: str = "") -> dict:
             tags = drop_ai_tags(tags)
         if rule.get("character_tag"):
             tags = with_character_tag(tags, character, max_tags=rule.get("max_tags"))
-        site = {"caption": caption, "tags": tags}
+        site = with_parts({"caption": caption, "tags": tags}, entry)
         entry_title = str(entry.get("title") or "").strip()
         if entry_title:
             site["title"] = clip_title(entry_title, 50)
@@ -964,7 +1060,7 @@ def _json_objects(text: str):
 
 
 def http_error_message(model: str, response) -> str:
-    """A readable message for a non-200 reply from OpenCode Go.
+    """A readable message for a non-200 reply from the provider.
 
     Callers scrub the result before showing it, so a stray secret can never
     reach the UI even if a server echoed one back.
@@ -1001,11 +1097,13 @@ async def _call(cfg: dict, model: str, messages: list, timeout: float) -> str:
     headers = {
         "Authorization": f"Bearer {cfg.get('api_key', '')}",
         "User-Agent": USER_AGENT,
-        "x-opencode-session": _SESSION_ID,
     }
+    if provider(cfg) == "opencode":
+        headers["x-opencode-session"] = _SESSION_ID
+    endpoint = PROVIDERS[provider(cfg)]["endpoint"]
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=15.0)) as client:
-            response = await client.post(ENDPOINT, headers=headers, json=payload)
+            response = await client.post(endpoint, headers=headers, json=payload)
     except httpx.TimeoutException as exc:
         raise CaptionUnavailable(f"{model}: timed out after {timeout:.0f}s") from exc
     except httpx.HTTPError as exc:
@@ -1019,7 +1117,7 @@ async def _call(cfg: dict, model: str, messages: list, timeout: float) -> str:
         body = response.json()
         message = body["choices"][0]["message"]
     except (ValueError, KeyError, IndexError, TypeError):
-        raise CaptionError(f"{model}: unexpected response from OpenCode Go")
+        raise CaptionError(f"{model}: unexpected response from {provider_label(cfg)}")
     content = message.get("content")
     if isinstance(content, list):  # some providers send content as parts
         content = "".join(
@@ -1080,8 +1178,7 @@ async def generate(*, cfg: dict, images=(), character: str = "", series: str = "
                    notes: str = "", mature: bool = False, platforms=(),
                    caption_draft: str = "", caption_exact: bool = False) -> dict:
     """Write a caption/tags/alt text for each selected site. Raises CaptionError."""
-    if not str(cfg.get("api_key") or "").strip():
-        raise CaptionError("Caption AI is not set up yet — add your OpenCode Go API key.")
+    _require_key(cfg)
     character = str(character or "").strip()
     if not character:
         raise CaptionError("Type the character name first.")
@@ -1096,12 +1193,11 @@ async def generate(*, cfg: dict, images=(), character: str = "", series: str = "
                        mature=mature, platforms=platforms,
                        add_ai_tag=bool(cfg.get("add_ai_tag", True)),
                        caption_draft=caption_draft, caption_exact=bool(caption_exact))
-    vision_model = str(cfg.get("vision_model") or DEFAULT_VISION_MODEL)
-    backup_model = str(cfg.get("backup_model") or DEFAULT_BACKUP_MODEL)
+    vision, backup = vision_model(cfg), backup_model(cfg)
     if image is not None:
-        attempts = [(vision_model, True), (backup_model, True), (backup_model, False)]
+        attempts = [(vision, True), (backup, True), (backup, False)]
     else:
-        attempts = [(vision_model, False), (backup_model, False)]
+        attempts = [(vision, False), (backup, False)]
 
     last_error = ""
     errors: list[Exception] = []
@@ -1132,13 +1228,11 @@ async def generate(*, cfg: dict, images=(), character: str = "", series: str = "
 
 async def test_connection(cfg: dict) -> str:
     """Ask each model the colour of a tiny solid image; it proves they see."""
-    if not str(cfg.get("api_key") or "").strip():
-        raise CaptionError("Add your OpenCode Go API key first.")
+    _require_key(cfg)
     image = _solid_colour_part()
-    vision_model = str(cfg.get("vision_model") or DEFAULT_VISION_MODEL)
-    backup_model = str(cfg.get("backup_model") or DEFAULT_BACKUP_MODEL)
+    vision, backup = vision_model(cfg), backup_model(cfg)
     results = []
-    for role, model in (("vision", vision_model), ("backup", backup_model)):
+    for role, model in (("vision", vision), ("backup", backup)):
         messages = _messages("What colour fills this image? Reply with one word.", image)
         try:
             answer = await _call(cfg, model, messages, VISION_TIMEOUT)

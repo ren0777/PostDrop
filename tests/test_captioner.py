@@ -921,3 +921,69 @@ def test_a_blank_mixed_caption_gets_a_catchy_fallback(monkeypatch, tmp_path):
     assert pixiv["title"] == captioner.MIXED_FALLBACK_TITLE_JA
     assert result["platforms"]["bluesky"]["caption"]  # the skipped site got one too
     assert "Kafka" in pixiv["tags"] and "Stelle" in pixiv["tags"]
+
+
+# ---------------------------------------------------------------- providers
+def test_switching_provider_keeps_the_other_ones_key_and_models():
+    cfg = {"api_key": "oc-key", "vision_model": "vm", "add_ai_tag": False}
+    gemini = captioner.switch_provider(cfg, "gemini")
+    assert captioner.provider(gemini) == "gemini"
+    assert "api_key" not in gemini
+    assert captioner.vision_model(gemini) == captioner.PROVIDERS["gemini"]["vision_model"]
+    assert gemini["add_ai_tag"] is False  # shared settings stay put
+
+    gemini["api_key"] = "g-key"
+    back = captioner.switch_provider(gemini, "opencode")
+    assert back["api_key"] == "oc-key" and back["vision_model"] == "vm"
+    assert captioner.switch_provider(back, "gemini")["api_key"] == "g-key"
+
+
+def test_gemini_requests_go_to_googles_endpoint(monkeypatch):
+    sent = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, headers, json):
+            sent.update(url=url, headers=headers, model=json["model"])
+            import httpx
+            return httpx.Response(200, json={"choices": [{"message": {"content": "red"}}]})
+
+    monkeypatch.setattr(captioner.httpx, "AsyncClient", FakeClient)
+    answer = asyncio.run(captioner._call({"provider": "gemini", "api_key": "g"},
+                                         "gemini-3.8-flash", [], 5))
+    assert answer == "red"
+    assert sent["url"].startswith("https://generativelanguage.googleapis.com/")
+    assert sent["headers"]["Authorization"] == "Bearer g"
+    assert "x-opencode-session" not in sent["headers"]
+
+
+def test_the_missing_key_message_names_the_provider(tmp_path):
+    with pytest.raises(CaptionError, match="Google Gemini"):
+        asyncio.run(captioner.generate(cfg={"provider": "gemini"}, character="X",
+                                       platforms=["bluesky"]))
+
+
+# ---------------------------------------------------------------- split sets
+def test_a_split_site_is_asked_for_one_caption_per_post():
+    prompt = captioner.build_lazy_prompt(platforms=["bluesky", "telegram"],
+                                         parts={"bluesky": 3})
+    assert "bluesky splits this set into 3 separate posts" in prompt
+    assert "telegram splits" not in prompt
+    exact = captioner.build_lazy_prompt(platforms=["bluesky"], parts={"bluesky": 3},
+                                        caption_draft="Hi", caption_exact=True)
+    assert "separate posts" not in exact  # the artist's words go on every post
+
+
+def test_per_post_captions_survive_normalising():
+    data = {"platforms": {"bluesky": {"caption": "a", "tags": [],
+                                      "captions": ["a", "b #tag", ""]}}}
+    entry = normalize(data, ["bluesky"])["platforms"]["bluesky"]
+    assert entry["captions"] == ["a", "b"]

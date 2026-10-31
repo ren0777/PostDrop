@@ -181,6 +181,18 @@ def test_caption_settings_roundtrip_without_echoing_the_key(client):
     assert "secret-key-123" not in json.dumps(got)
 
 
+def test_caption_provider_switch_keeps_each_key(client):
+    client.post("/api/caption/settings", headers=HEADERS, json={"api_key": "oc-key"})
+    client.post("/api/caption/settings", headers=HEADERS, json={"provider": "gemini"})
+    got = client.get("/api/caption/settings", headers=HEADERS).json()
+    assert got["provider"] == "gemini"
+    assert got["api_key_saved"] is False
+    assert got["vision_model"] == got["providers"]["gemini"]["vision_model"]
+
+    client.post("/api/caption/settings", headers=HEADERS, json={"provider": "opencode"})
+    assert client.get("/api/caption/settings", headers=HEADERS).json()["api_key_saved"] is True
+
+
 def test_caption_needs_a_key(client):
     response = client.post("/api/caption", headers=HEADERS,
                            json={"character": "Ch", "platforms": ["bluesky"]}).json()

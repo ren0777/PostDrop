@@ -58,6 +58,9 @@ class LazyWorker:
         self.escalations = 0  # this pass: identifies allowed to use the backup models
         self.recovered = False  # the one-off retry of older AI-error entries
         self._task: asyncio.Task | None = None
+        # The loop, "Scan now" and "Retry" all scan: one at a time, or a slow AI
+        # call lets several scans queue the same set before it is recorded.
+        self._scan_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ control
     def start(self) -> None:
@@ -113,6 +116,10 @@ class LazyWorker:
 
     # ---------------------------------------------------------------- scanning
     async def scan(self) -> dict:
+        async with self._scan_lock:
+            return await self._scan()
+
+    async def _scan(self) -> dict:
         data = lazy.stored()
         if not data["enabled"]:
             return {"queued": 0, "needs_you": 0, "reason": "off"}
@@ -423,7 +430,8 @@ class LazyWorker:
                 result = await self.mixed(cfg=secrets.load(CAPTION_KEY), images=[fresh[0]],
                                           characters=names, series=series, platforms=sites,
                                           mature=mature, caption_draft=draft,
-                                          caption_exact=exact, given=given)
+                                          caption_exact=exact, given=given,
+                                          parts=self._parts(cards, fresh))
                 queue.ai_reset(retry_key)
             except captioner.CaptionUnavailable as exc:
                 attempts = queue.ai_failed(retry_key)
@@ -457,6 +465,7 @@ class LazyWorker:
             for entry in (result.get("platforms") or {}).values():
                 if isinstance(entry, dict):
                     entry["caption"] = draft
+                    entry.pop("captions", None)
         queued = self._enqueue(batch_key, directory, folder, cards, fresh, digests, result,
                                mature=mature, character=label,
                                series=", ".join(series))
@@ -577,7 +586,8 @@ class LazyWorker:
                     async def ask() -> dict:
                         return await self.caption(
                             cfg=secrets.load(CAPTION_KEY), images=[fresh[0]],
-                            platforms=sites, mature=mature, given=given, **extra,
+                            platforms=sites, mature=mature, given=given,
+                            parts=self._parts(cards, fresh), **extra,
                         )
 
                     result = await ask()
@@ -631,6 +641,7 @@ class LazyWorker:
             for entry in (result.get("platforms") or {}).values():
                 if isinstance(entry, dict):
                     entry["caption"] = draft
+                    entry.pop("captions", None)
 
         # Who the set is: the folder name when the artist gave one, else the split's answer.
         character, series = self._who(result, identity, given)
@@ -696,6 +707,17 @@ class LazyWorker:
                 return ", ".join(names), series
         return str(result.get("character") or ""), str(result.get("series") or "")
 
+    @staticmethod
+    def _parts(cards: list[str], images: list[Path]) -> dict[str, int]:
+        """How many posts each site splits the set into (the AI writes one caption each)."""
+        data = lazy.stored()
+        parts: dict[str, int] = {}
+        for card_id in cards:
+            site = card_id.partition(":")[0]
+            count = len(lazy.chunks(list(images), lazy.limits_for(site, data)["per_post"]))
+            parts[site] = max(parts.get(site, 1), count)
+        return {site: count for site, count in parts.items() if count > 1}
+
     def _enqueue(self, batch_key: str, directory: Path, folder: dict, cards: list[str],
                  batch: list[Path], digests: dict[Path, str], result: dict, *,
                  mature: bool, character: str = "", series: str = "") -> int:
@@ -713,7 +735,8 @@ class LazyWorker:
                          card_id)
                 continue
             spacing[card_id] = limits["spacing_minutes"]
-            for chunk in lazy.chunks(list(batch), limits["per_post"]):
+            captions = [str(line) for line in text.get("captions") or [] if str(line).strip()]
+            for part, chunk in enumerate(lazy.chunks(list(batch), limits["per_post"])):
                 kept = [path for path in chunk
                         if not queue.already_posted(self._digest(digests, path), card_id)]
                 if not kept:
@@ -725,7 +748,9 @@ class LazyWorker:
                     "card_id": card_id,
                     "images": [str(path) for path in kept],
                     "cover": str(kept[0]),
-                    "caption": str(text.get("caption") or ""),
+                    # each post of a split set gets its own wording when the AI wrote one
+                    "caption": (captions[part] if part < len(captions)
+                                else str(text.get("caption") or "")),
                     "tags": [str(tag) for tag in (text.get("tags") or [])],
                     "alt_text": str(result.get("alt_text") or ""),
                     "character": character or str(result.get("character") or ""),
