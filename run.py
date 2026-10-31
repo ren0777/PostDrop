@@ -1,7 +1,9 @@
-"""Start the ArtDrop server and open the browser.
+"""Start the ArtDrop server.
 
-If the port is already in use, assume ArtDrop is running and just open the
-browser. Keep the console window open while you post.
+The browser is not opened for you: go to the printed address yourself. Set
+ARTDROP_OPEN_BROWSER=1 to have it opened automatically again. If the port is
+already in use, assume ArtDrop is running. Keep the console window open while
+you post.
 """
 from __future__ import annotations
 
@@ -20,15 +22,17 @@ def already_running() -> bool:
 
 
 def main() -> int:
+    open_browser = os.environ.get("ARTDROP_OPEN_BROWSER") == "1"
     if already_running():
-        print(f"[ArtDrop] Already running — opening {URL}")
-        webbrowser.open(URL)
+        print(f"[ArtDrop] Already running at {URL}")
+        if open_browser:
+            webbrowser.open(URL)
         return 0
 
-    os.environ["ARTDROP_OPEN_BROWSER"] = "1"
     import uvicorn
 
-    print(f"[ArtDrop] Starting at {URL} — keep this window open while you post.")
+    print(f"[ArtDrop] Starting at {URL} — open that address in your browser, "
+          "and keep this window open while you post.")
     uvicorn.run("app.main:app", host=HOST, port=PORT, log_level="info")
     return 0
 

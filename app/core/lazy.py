@@ -11,6 +11,7 @@ caption styles — never secrets, which stay in the keyring.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import time
 from pathlib import Path
@@ -266,23 +267,39 @@ def batches(folder: Path, now: float | None = None,
         groups.setdefault(path.parent, []).append(path)
 
     out: list[list[Path]] = []
-    for group in groups.values():
-        group.sort(key=lambda path: (path.stat().st_mtime, path.name.lower()))
+    for parent, group in groups.items():
+        if parent != folder:
+            # A subfolder is one post, however far apart its files were made
+            # (issue #3): file-name order, the first is the cover.
+            out.append(sorted(group, key=lambda path: path.name.lower()))
+            continue
+        group.sort(key=lambda path: (arrived(path), path.name.lower()))
         run: list[Path] = []
         previous = 0.0
         for path in group:
-            mtime = path.stat().st_mtime
-            if run and mtime - previous > BATCH_WINDOW_SECONDS:
+            when = arrived(path)
+            if run and when - previous > BATCH_WINDOW_SECONDS:
                 out.append(run)
                 run = []
             run.append(path)
-            previous = mtime
+            previous = when
         if run:
             out.append(run)
 
-    ready = [batch for batch in out if now - batch[-1].stat().st_mtime >= settle]
-    ready.sort(key=lambda batch: batch[0].stat().st_mtime)
+    ready = [batch for batch in out
+             if now - max(arrived(path) for path in batch) >= settle]
+    ready.sort(key=lambda batch: min(arrived(path) for path in batch))
     return ready
+
+
+def arrived(path: Path) -> float:
+    """When a file landed here: copied files keep their old modified date, but
+    their creation time on this disk is the moment of the copy."""
+    stat = path.stat()
+    created = getattr(stat, "st_birthtime", None)
+    if created is None:
+        created = stat.st_ctime if os.name == "nt" else 0.0
+    return max(float(stat.st_mtime), float(created or 0.0))
 
 
 def batch_key(folder: Path, batch: list[Path]) -> str:

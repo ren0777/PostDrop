@@ -213,12 +213,13 @@ def _touch_slot(connection, card_id: str, when: float) -> None:
 
 
 def compact_schedule(now: float | None = None, quiet: dict | None = None) -> int:
-    """Close the gaps that removed or dropped posts left behind.
+    """Give every waiting post the time it will really go out.
 
-    A queued post reserves its card's next slot, and slots only ever grew, so
-    deleting posts left the rest waiting hours for nothing. Each card's waiting
-    posts are re-spaced from its last real post (or now), keeping their order;
-    a post is only ever moved earlier, never later. Returns how many moved.
+    A queued post reserves its card's next slot, so deleting posts left gaps,
+    and a PC that was off left posts "due" hours in the past. Each card's
+    waiting posts are re-spaced from its last real post (or now), keeping their
+    order. That never delays anything: a card cannot post sooner than its
+    spacing allows anyway, so the new time is the true one. Returns how many moved.
     """
     now = time.time() if now is None else now
     data = lazy.stored()
@@ -239,14 +240,13 @@ def compact_schedule(now: float | None = None, quiet: dict | None = None) -> int
             for entry in connection.execute(
                     "SELECT id, due_at FROM items WHERE card_id = ? AND status = 'pending' "
                     "ORDER BY due_at ASC, id ASC", (card_id,)).fetchall():
-                slot = shift_out_of_quiet(cursor_at, quiet)
-                due = min(float(entry["due_at"]), slot)
-                if due < float(entry["due_at"]):
+                due = shift_out_of_quiet(cursor_at, quiet)
+                if abs(due - float(entry["due_at"])) >= 1:
                     connection.execute("UPDATE items SET due_at = ? WHERE id = ?",
                                        (due, int(entry["id"])))
                     moved += 1
                 last_due = max(last_due, due)
-                cursor_at = max(slot, due) + spacing
+                cursor_at = due + spacing
             connection.execute(
                 """INSERT INTO cards (card_id, last_post_at, last_slot) VALUES (?, 0, ?)
                    ON CONFLICT(card_id) DO UPDATE SET last_slot = ?""",

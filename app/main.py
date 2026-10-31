@@ -116,7 +116,11 @@ async def guard(request: Request, call_next):
             return JSONResponse({"error": "forbidden host"}, status_code=403)
         if request.method != "GET" and request.headers.get("x-artdrop") != "1":
             return JSONResponse({"error": "missing X-ArtDrop header"}, status_code=403)
-    return await call_next(request)
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        # revalidate every load, so an update never runs against a stale app.js
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 # --------------------------------------------------------------------- pages
@@ -906,9 +910,12 @@ async def get_history(limit: int = 100):
 async def caption_settings():
     cfg = secrets.load(CAPTION_KEY)
     return {
+        "provider": captioner.provider(cfg),
+        "providers": {name: {key: info[key] for key in ("label", "vision_model", "backup_model")}
+                      for name, info in captioner.PROVIDERS.items()},
         "api_key_saved": bool(cfg.get("api_key")),
-        "vision_model": cfg.get("vision_model") or captioner.DEFAULT_VISION_MODEL,
-        "backup_model": cfg.get("backup_model") or captioner.DEFAULT_BACKUP_MODEL,
+        "vision_model": captioner.vision_model(cfg),
+        "backup_model": captioner.backup_model(cfg),
         "strong_model": cfg.get("strong_model") or "",
         "add_ai_tag": bool(cfg.get("add_ai_tag", True)),
         "configured": bool(cfg.get("api_key")),
@@ -919,6 +926,8 @@ async def caption_settings():
 async def save_caption_settings(request: Request):
     body = await _json_body(request)
     cfg = secrets.load(CAPTION_KEY)
+    if body.get("provider"):  # the other provider's key and models are kept aside
+        cfg = captioner.switch_provider(cfg, str(body["provider"]))
     if body.get("api_key"):
         cfg["api_key"] = str(body["api_key"]).strip()
     for key in ("vision_model", "backup_model"):
